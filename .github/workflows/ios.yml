@@ -27,9 +27,14 @@ on:
         description: 'Шаблон ссылки на PDF расписания'
         required: false
         default: 'https://example.com/schedule_{yyyy-MM-dd}.pdf'
+      release_tag:
+        description: 'Тег релиза для .ipa (пусто — будет build-<номер сборки>)'
+        required: false
+        default: ''
 
 permissions:
-  contents: read
+  # Нужно для публикации .ipa в разделе Releases.
+  contents: write
 
 jobs:
   build-ios:
@@ -123,3 +128,44 @@ jobs:
           path: build/ios/iphoneos/Runner.app.dSYM
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Опубликовать .ipa в GitHub Releases
+        # Релиз создаётся при пуше тега (v1.0.0) или при ручном запуске
+        # workflow; для обычных пушей в ветку достаточно артефактов.
+        if: github.ref_type == 'tag' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        run: |
+          set -euo pipefail
+
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            TAG="${GITHUB_REF_NAME}"
+          else
+            TAG="${RELEASE_TAG}"
+            if [ -z "${TAG}" ]; then TAG="build-${GITHUB_RUN_NUMBER}"; fi
+          fi
+
+          NOTES="$(cat <<EOF
+          Неподписанный .ipa (сборка с --no-codesign) для установки через SideStore / AltStore / Sideloadly.
+
+          - Версия: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' build/ios/iphoneos/Runner.app/Info.plist) ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' build/ios/iphoneos/Runner.app/Info.plist))
+          - Bundle ID: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' build/ios/iphoneos/Runner.app/Info.plist)
+          - Коммит: ${GITHUB_SHA}
+
+          Установка: скачать Schedly-unsigned.ipa на iPhone и открыть его в SideStore.
+          Подпись выполняется на устройстве (бесплатный Apple ID, срок 7 дней).
+          EOF
+          )"
+
+          if gh release view "${TAG}" >/dev/null 2>&1; then
+            echo "Релиз ${TAG} уже существует — обновляем файл"
+            gh release upload "${TAG}" Schedly-unsigned.ipa --clobber
+          else
+            echo "Создаём релиз ${TAG}"
+            gh release create "${TAG}" Schedly-unsigned.ipa \
+              --title "Schedly ${TAG}" \
+              --notes "${NOTES}"
+          fi
+
+          gh release view "${TAG}" --json url --jq '"Релиз: " + .url'

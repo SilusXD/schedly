@@ -97,6 +97,21 @@ zip -qry Schedly-unsigned.ipa Payload
 Готовый `Schedly-unsigned.ipa` скачивается со страницы запуска workflow
 (раздел *Artifacts*) и устанавливается через SideStore.
 
+Кроме артефактов, `.ipa` публикуется в разделе **Releases**:
+
+* при пуше тега — `git tag v1.0.0 && git push origin v1.0.0`;
+* при ручном запуске workflow (поле `release_tag`; если оставить пустым, тег
+  будет `build-<номер сборки>`).
+
+Повторный запуск с тем же тегом не падает: файл в существующем релизе
+перезаписывается. Артефакты (`Runner.app`, dSYM) при этом остаются только в
+разделе *Artifacts*.
+
+Важно про имя приложения: `CFBundleDisplayName` и `CFBundleName` должны быть
+**латинскими** (`Schedly`). SideStore передаёт имя приложения как имя App ID при
+регистрации, а Apple принимает только ASCII — с кириллическим именем установка
+падает с ошибкой «An invalid value … was provided for the parameter 'appIdName'».
+
 * Пошаговая инструкция по подписи и установке без Mac и без платного аккаунта
   разработчика: [docs/ios-signing-sidestore.md](docs/ios-signing-sidestore.md)
 * Разбор типичных ошибок установки и запуска:
