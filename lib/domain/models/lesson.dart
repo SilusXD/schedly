@@ -44,6 +44,8 @@ class Lesson implements Comparable<Lesson> {
     this.note = '',
     this.parity = WeekParity.both,
     this.rawText = '',
+    this.plannedTeacherName = '',
+    this.isReplacement = false,
   });
 
   /// День недели занятия.
@@ -81,6 +83,16 @@ class Lesson implements Comparable<Lesson> {
 
   /// Исходная строка расписания — помогает разбирать ошибки парсинга.
   final String rawText;
+
+  /// Преподаватель по базовому (полугодовому) расписанию.
+  ///
+  /// Заполняется, когда занятие собрано из двух источников: ежедневное
+  /// расписание даёт фактического преподавателя, полугодовое — планового.
+  /// Если они расходятся, [isReplacement] = true.
+  final String plannedTeacherName;
+
+  /// Признак замены: фактический преподаватель отличается от планового.
+  final bool isReplacement;
 
   /// Человекочитаемый диапазон времени: `08:30–10:00`, `08:30` или пустая строка.
   String get timeRange {
@@ -140,6 +152,8 @@ class Lesson implements Comparable<Lesson> {
     String? note,
     WeekParity? parity,
     String? rawText,
+    String? plannedTeacherName,
+    bool? isReplacement,
   }) {
     return Lesson(
       weekday: weekday ?? this.weekday,
@@ -154,6 +168,8 @@ class Lesson implements Comparable<Lesson> {
       note: note ?? this.note,
       parity: parity ?? this.parity,
       rawText: rawText ?? this.rawText,
+      plannedTeacherName: plannedTeacherName ?? this.plannedTeacherName,
+      isReplacement: isReplacement ?? this.isReplacement,
     );
   }
 
@@ -175,6 +191,8 @@ class Lesson implements Comparable<Lesson> {
       note: pick(note, other.note),
       parity: parity == WeekParity.both ? other.parity : parity,
       rawText: rawText.trim().isNotEmpty ? rawText : other.rawText,
+      plannedTeacherName: pick(plannedTeacherName, other.plannedTeacherName),
+      isReplacement: isReplacement || other.isReplacement,
     );
   }
 
@@ -208,6 +226,8 @@ class Lesson implements Comparable<Lesson> {
         'note': note,
         'parity': parity.name,
         'raw': rawText,
+        if (plannedTeacherName.isNotEmpty) 'plannedTeacher': plannedTeacherName,
+        if (isReplacement) 'replacement': true,
       };
 
   factory Lesson.fromJson(Map<String, dynamic> json) {
@@ -227,6 +247,8 @@ class Lesson implements Comparable<Lesson> {
         orElse: () => WeekParity.both,
       ),
       rawText: _asString(json['raw']),
+      plannedTeacherName: _asString(json['plannedTeacher']),
+      isReplacement: json['replacement'] == true,
     );
   }
 

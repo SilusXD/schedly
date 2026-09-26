@@ -6,6 +6,8 @@ import '../../domain/models/schedule.dart';
 import '../../domain/models/weekday.dart';
 import '../pdf/pdf_text.dart';
 import 'cell_parser.dart';
+import 'kip_daily_parser.dart';
+import 'kip_semester_parser.dart';
 import 'page_layout.dart';
 import 'parser_config.dart';
 
@@ -96,7 +98,27 @@ class ScheduleParser {
     final Map<String, Lesson> collected = <String, Lesson>{};
     final Set<String> usedStrategies = <String>{};
 
+    // Сначала пробуем специализированные форматы расписаний КИП: это матрицы
+    // «преподаватель × пара» (ежедневное «общее») и «группа × пара»
+    // (полугодовое). Их структура не описывается общими стратегиями ниже,
+    // поэтому формат определяется по признакам шапки таблицы.
+    final List<Lesson> kipLessons = <Lesson>[];
+    if (KipDailyParser.matches(document)) {
+      kipLessons.addAll(KipDailyParser(logger: logger).parse(document));
+      if (kipLessons.isNotEmpty) {
+        usedStrategies.add('kip-daily');
+      }
+    } else if (KipSemesterParser.matches(document)) {
+      kipLessons.addAll(KipSemesterParser(logger: logger).parse(document));
+      if (kipLessons.isNotEmpty) {
+        usedStrategies.add('kip-semester');
+      }
+    }
+
     for (final PdfPageText page in document.pages) {
+      if (kipLessons.isNotEmpty) {
+        break;
+      }
       final PageLayout layout = PageLayout.build(page, config);
 
       List<Lesson> pageLessons = <Lesson>[];
@@ -128,15 +150,27 @@ class ScheduleParser {
       }
     }
 
-    if (collected.isEmpty) {
-      throw ScheduleParseException(
-        'Не удалось распознать ни одного занятия',
-        details: warnings.isEmpty ? null : warnings,
-      );
+    final List<Lesson> lessons;
+    if (kipLessons.isNotEmpty) {
+      // В матрицах КИП одно занятие описывается парой «группа + преподаватель»,
+      // поэтому обычный ключ склейки (без группы) здесь не подходит.
+      final Map<String, Lesson> unique = <String, Lesson>{};
+      for (final Lesson lesson in kipLessons) {
+        unique['${lesson.weekday.isoNumber}|${lesson.pairNumber}|'
+            '${lesson.groupName}|${lesson.teacherName}'] = lesson;
+      }
+      lessons = unique.values.toList()
+        ..sort((Lesson a, Lesson b) => a.compareTo(b));
+    } else {
+      if (collected.isEmpty) {
+        throw ScheduleParseException(
+          'Не удалось распознать ни одного занятия',
+          details: warnings.isEmpty ? null : warnings,
+        );
+      }
+      lessons = collected.values.toList()
+        ..sort((Lesson a, Lesson b) => a.compareTo(b));
     }
-
-    final List<Lesson> lessons = collected.values.toList()
-      ..sort((Lesson a, Lesson b) => a.compareTo(b));
 
     // Догружаем типовое время, если в PDF его не было.
     final List<Lesson> withTime = _applyDefaultPairTimes(lessons, warnings);
