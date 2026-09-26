@@ -641,10 +641,15 @@ class _FontInfo {
   /// Решает, трактовать ли однобайтовые коды как CP1251.
   ///
   /// В реальных PDF продюсеры часто кладут байты CP1251 в шрифт с
-  /// `/Encoding /WinAnsiEncoding` (распространённый русский вариант). Признак:
-  /// коды в диапазоне 0xC0..0xFF встречаются минимум 5 раз и составляют не
-  /// менее четверти всех кодов шрифта. Для «западной» латиницы высокая доля
-  /// таких кодов нетипична.
+  /// `/Encoding /WinAnsiEncoding` (распространённый русский вариант). Признак —
+  /// высокая доля кодов в диапазоне 0xC0..0xFF: в CP1252 там лежат только
+  /// латинские буквы с диакритикой (À–ÿ), которые в русских документах
+  /// практически не встречаются.
+  ///
+  /// Порог проверяется двумя способами: для больших текстов достаточно
+  /// четверти таких кодов, для коротких строк (например, заголовка «Раз»)
+  /// требовать не менее половины — иначе эвристика не срабатывала на малом
+  /// объёме данных.
   void decideLegacy() {
     if (_decided) return;
     _decided = true;
@@ -655,12 +660,19 @@ class _FontInfo {
     }
     var high = 0;
     var total = 0;
-    _histogram.forEach((code, count) {
-      total += count;
-      if (code >= 0xC0 && code <= 0xFF) high += count;
-    });
+    for (final entry in _histogram.entries) {
+      total += entry.value;
+      if (entry.key >= 0xC0 && entry.key <= 0xFF) high += entry.value;
+    }
     if (total == 0) return;
-    if (high >= 5 && high / total >= 0.25) _cp1251Override = true;
+    final double highRatio = high / total;
+    if (high >= 5 && highRatio >= 0.25) {
+      _cp1251Override = true;
+      return;
+    }
+    if (high >= 2 && highRatio >= 0.5) {
+      _cp1251Override = true;
+    }
   }
 
   String _charFor(int code) {
