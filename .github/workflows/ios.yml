@@ -1,0 +1,125 @@
+name: Build iOS (unsigned .ipa)
+
+# Сборка iOS-приложения без Mac: раннером выступает macOS-агент GitHub.
+# Подпись не выполняется (--no-codesign): полученный .ipa подписывается уже на
+# устройстве средствами SideStore/AltStore под бесплатный Apple ID.
+#
+# Артефакты:
+#   * Schedly-unsigned.ipa  — для установки через SideStore/AltStore/Sideloadly;
+#   * Runner.app            — на случай ручной упаковки;
+#   * dSYM                  — символы для разбора крашлогов.
+
+on:
+  push:
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      build_name:
+        description: 'Версия (CFBundleShortVersionString), например 1.0.1'
+        required: false
+        default: ''
+      build_number:
+        description: 'Номер сборки (CFBundleVersion), например 42'
+        required: false
+        default: ''
+      schedule_url_template:
+        description: 'Шаблон ссылки на PDF расписания'
+        required: false
+        default: 'https://example.com/schedule_{yyyy-MM-dd}.pdf'
+
+permissions:
+  contents: read
+
+jobs:
+  build-ios:
+    name: Сборка iOS без подписи
+    runs-on: macos-latest
+
+    steps:
+      - name: Получить исходники
+        uses: actions/checkout@v4
+
+      - name: Установить Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.41.6'
+          channel: stable
+          cache: true
+
+      - name: Показать версии инструментов
+        run: |
+          flutter --version
+          xcodebuild -version
+          pod --version
+
+      - name: Зависимости
+        run: flutter pub get
+
+      - name: Статический анализ
+        run: flutter analyze
+
+      - name: Тесты
+        run: flutter test
+
+      - name: Собрать iOS без подписи
+        env:
+          BUILD_NAME: ${{ github.event.inputs.build_name }}
+          BUILD_NUMBER: ${{ github.event.inputs.build_number }}
+          URL_TEMPLATE: ${{ github.event.inputs.schedule_url_template }}
+        run: |
+          ARGS=(
+            --release
+            --no-codesign
+            --dart-define=SCHEDULE_URL_TEMPLATE="${URL_TEMPLATE:-https://example.com/schedule_{yyyy-MM-dd}.pdf}"
+          )
+          if [ -n "${BUILD_NAME}" ]; then ARGS+=(--build-name="${BUILD_NAME}"); fi
+          if [ -n "${BUILD_NUMBER}" ]; then ARGS+=(--build-number="${BUILD_NUMBER}"); fi
+          flutter build ios "${ARGS[@]}"
+
+      - name: Проверить архитектуры бинарника
+        run: |
+          APP=build/ios/iphoneos/Runner.app
+          test -d "$APP" || { echo "Runner.app не найден"; exit 1; }
+          lipo -info "$APP/Runner" || true
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$APP/Info.plist"
+
+      - name: Упаковать неподписанный .ipa
+        run: |
+          set -euo pipefail
+          APP=build/ios/iphoneos/Runner.app
+          rm -rf Payload Schedly-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # Упаковка через zip: SideStore/AltStore принимают именно такой формат
+          # (Payload/Runner.app внутри zip-архива).
+          zip -qry Schedly-unsigned.ipa Payload
+          ls -lh Schedly-unsigned.ipa
+          unzip -l Schedly-unsigned.ipa | head -5
+
+      - name: Загрузить .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Schedly-unsigned-ipa
+          path: Schedly-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Загрузить Runner.app
+        uses: actions/upload-artifact@v4
+        with:
+          name: Runner-app
+          path: build/ios/iphoneos/Runner.app
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Загрузить dSYM (символы для крашлогов)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dSYM
+          path: build/ios/iphoneos/Runner.app.dSYM
+          if-no-files-found: ignore
+          retention-days: 14
