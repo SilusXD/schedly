@@ -18,10 +18,6 @@ class KipSemesterParser {
 
   final AppLogger _logger;
 
-  /// Отступ сверху, на который содержимое ячейки может «подниматься»
-  /// относительно времени своей пары.
-  static const double _sectionOffset = 15;
-
   /// Определяет, похож ли документ на полугодовое расписание КИП.
   static bool matches(PdfDocumentText document) {
     for (final PdfPageText page in document.pages) {
@@ -71,22 +67,38 @@ class KipSemesterParser {
         continue;
       }
 
-      for (int index = 0; index < anchors.length; index++) {
-        final _PairAnchor anchor = anchors[index];
-        final double topFrom = anchor.top - _sectionOffset;
-        final double topTo = index + 1 < anchors.length
-            ? anchors[index + 1].top - _sectionOffset
-            : page.height;
+      for (final MatrixColumn column in columns) {
+        // Фрагменты колонки распределяются по парам по БЛИЖАЙШЕМУ якорю
+        // времени: это устойчивее деления на секции, потому что текст ячейки
+        // может «подниматься» над временем своей пары и заходить за границу
+        // соседней. Всё, что выше первой пары, — это шапка с подписями
+        // колонок, поэтому такие фрагменты исключаются.
+        final double contentTop = anchors.first.top - 20;
+        final List<PdfTextFragment> columnFragments = page.lines
+            .expand((PdfTextLine line) => line.fragments)
+            .where((PdfTextFragment f) =>
+                f.text.trim().isNotEmpty &&
+                f.left >= serviceEdge &&
+                f.top >= contentTop &&
+                MatrixLayout.nearestColumnByLeft(f, columns) == column.index)
+            .toList();
 
-        for (final MatrixColumn column in columns) {
-          final List<PdfTextFragment> fragments = MatrixLayout.fragmentsIn(
-            page: page,
-            columns: columns,
-            column: column,
-            topFrom: topFrom,
-            topTo: topTo,
-            minLeft: serviceEdge,
-          );
+        final Map<int, List<PdfTextFragment>> byPair = <int, List<PdfTextFragment>>{};
+        for (final PdfTextFragment fragment in columnFragments) {
+          final int pairIndex = _nearestAnchorIndex(fragment.top, anchors);
+          if (pairIndex < 0) {
+            continue;
+          }
+          byPair.putIfAbsent(pairIndex, () => <PdfTextFragment>[]).add(fragment);
+        }
+
+        for (final MapEntry<int, List<PdfTextFragment>> entry in byPair.entries) {
+          final _PairAnchor anchor = anchors[entry.key];
+          final List<PdfTextFragment> fragments = entry.value
+            ..sort((PdfTextFragment a, PdfTextFragment b) {
+              final int byTop = a.top.compareTo(b.top);
+              return byTop != 0 ? byTop : a.left.compareTo(b.left);
+            });
           if (fragments.isEmpty) {
             continue;
           }
@@ -103,23 +115,45 @@ class KipSemesterParser {
             }
           }
 
-          final String subject = MatrixLayout.normalizeSpaces(subjectLines.join(' '));
-          final String teacher =
-              MatrixLayout.normalizeSpaces(teacherLines.join(', '));
-          if (subject.isEmpty && teacher.isEmpty) {
+          // Название предмета может занимать несколько строк («Иностранный
+          // язык в сфере профессиональной деятельности»), поэтому все строки
+          // без ФИО склеиваются в одно название.
+          final String subject =
+              MatrixLayout.normalizeSpaces(subjectLines.join(' '));
+
+          if (teacherLines.isEmpty) {
+            if (subject.isEmpty) {
+              continue;
+            }
+            lessons.add(Lesson(
+              weekday: currentWeekday,
+              pairNumber: anchor.pairNumber,
+              subject: subject,
+              timeStart: anchor.timeStart,
+              timeEnd: anchor.timeEnd,
+              groupName: MatrixLayout.normalizeGroup(column.label),
+              rawText: '${column.label}: ${lines.join(' / ')}',
+            ));
             continue;
           }
 
-          lessons.add(Lesson(
-            weekday: currentWeekday,
-            pairNumber: anchor.pairNumber,
-            subject: subject,
-            timeStart: anchor.timeStart,
-            timeEnd: anchor.timeEnd,
-            teacherName: teacher,
-            groupName: MatrixLayout.normalizeGroup(column.label),
-            rawText: '${column.label}: $subject${teacher.isEmpty ? '' : ' / $teacher'}',
-          ));
+          // Две записи в одной ячейке означают деление семестра по неделям:
+          // первая — нечётная (числитель), вторая — чётная (знаменатель).
+          for (int slot = 0; slot < teacherLines.length; slot++) {
+            lessons.add(Lesson(
+              weekday: currentWeekday,
+              pairNumber: anchor.pairNumber,
+              subject: subject,
+              timeStart: anchor.timeStart,
+              timeEnd: anchor.timeEnd,
+              teacherName: MatrixLayout.normalizeSpaces(teacherLines[slot]),
+              groupName: MatrixLayout.normalizeGroup(column.label),
+              parity: teacherLines.length == 1
+                  ? WeekParity.both
+                  : (slot == 0 ? WeekParity.numerator : WeekParity.denominator),
+              rawText: '${column.label}: ${lines.join(' / ')}',
+            ));
+          }
         }
       }
     }
@@ -127,6 +161,23 @@ class KipSemesterParser {
     _logger.info('Полугодовое расписание: ${lessons.length} записей, '
         'групп ${lessons.map((Lesson l) => l.groupName).toSet().length}');
     return lessons;
+  }
+
+  /// Индекс якоря пары, ближайшего к позиции [top].
+  static int _nearestAnchorIndex(double top, List<_PairAnchor> anchors) {
+    if (anchors.isEmpty) {
+      return -1;
+    }
+    int best = 0;
+    double bestDistance = double.infinity;
+    for (int i = 0; i < anchors.length; i++) {
+      final double distance = (anchors[i].top - top).abs();
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = i;
+      }
+    }
+    return best;
   }
 
   /// Ищет день недели на странице.
