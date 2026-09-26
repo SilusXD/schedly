@@ -155,50 +155,80 @@ class OfflineFirstScheduleRepository implements ScheduleRepository {
     }
 
     final DateTime today = dateOnly(DateTime.now());
-    final SchedulePageLink? dailyLink = index.dailyFor(today);
-    if (dailyLink == null) {
-      throw ScheduleNotAvailableException('На странице нет ежедневного расписания');
+    // Ежедневных файлов на странице обычно несколько (например, на сегодня и
+    // на следующий учебный день), поэтому забираем все актуальные: тогда
+    // аудитории и замены известны не только на один день.
+    final List<SchedulePageLink> dailyLinks = index.daily
+        .where((SchedulePageLink link) {
+          final DateTime? date = link.date;
+          if (date == null) {
+            return false;
+          }
+          final int diff = dateOnly(date).difference(today).inDays;
+          return diff >= -7 && diff <= 7;
+        })
+        .toList();
+
+    if (dailyLinks.isEmpty) {
+      throw ScheduleNotAvailableException('На странице нет актуального ежедневного расписания');
     }
 
-    final DateTime dailyDate = dailyLink.date ?? today;
-    final SchedulePdf dailyPdf =
-        await _pdfSource.downloadLink(dailyLink.uri, dailyDate);
-    final PdfDocumentText dailyText = await _extractor.extract(dailyPdf.bytes);
-    final ParseOutcome dailyOutcome = _parser.parse(
-      dailyText,
-      scheduleDate: dailyDate,
-      sourceUrl: dailyLink.uri.toString(),
-    );
+    final List<Lesson> dailyLessons = <Lesson>[];
+    Uint8List? rawPdfBytes;
+    DateTime primaryDate = today;
+    String primaryUrl = '';
+    final List<String> warnings = <String>[];
+
+    for (final SchedulePageLink link in dailyLinks) {
+      final DateTime date = link.date ?? today;
+      final SchedulePdf pdf = await _pdfSource.downloadLink(link.uri, date);
+      final PdfDocumentText text = await _extractor.extract(pdf.bytes);
+      final ParseOutcome outcome = _parser.parse(
+        text,
+        scheduleDate: date,
+        sourceUrl: link.uri.toString(),
+      );
+      dailyLessons.addAll(outcome.schedule.lessons);
+      warnings.addAll(
+        outcome.schedule.warnings.map((String warning) => '${formatIsoDate(date)}: $warning'),
+      );
+      if (rawPdfBytes == null) {
+        rawPdfBytes = pdf.bytes;
+        primaryDate = date;
+        primaryUrl = link.uri.toString();
+      }
+    }
 
     final List<Lesson> semesterLessons = await _semesterLessons(index);
     final List<Lesson> merged = semesterLessons.isEmpty
-        ? dailyOutcome.schedule.lessons
+        ? dailyLessons
         : ScheduleMerger(logger: _logger).merge(
             semester: semesterLessons,
-            daily: dailyOutcome.schedule.lessons,
+            daily: dailyLessons,
           );
 
-    final List<String> warnings = <String>[...dailyOutcome.schedule.warnings];
     if (semesterLessons.isEmpty) {
       warnings.add('Полугодовое расписание недоступно: предметы не подставлены');
     }
 
     final ParsedSchedule schedule = ParsedSchedule.fromLessons(
       lessons: merged,
-      scheduleDate: dailyDate,
+      scheduleDate: primaryDate,
       parsedAt: DateTime.now(),
-      sourceUrl: dailyLink.uri.toString(),
+      sourceUrl: primaryUrl,
       warnings: warnings,
-      rawText: dailyOutcome.schedule.rawText,
+      rawText: null,
     );
 
     await _cache.save(schedule, maxEntries: _config.maxCacheFiles);
-    await _saveRawPdf(dailyPdf.bytes, dailyDate);
+    if (rawPdfBytes != null) {
+      await _saveRawPdf(rawPdfBytes, primaryDate);
+    }
 
     String? cloudMessage;
     if (_cloud != null && _cloudConfig.autoSync) {
       try {
-        await _uploadToCloud(schedule, pdfBytes: dailyPdf.bytes);
+        await _uploadToCloud(schedule, pdfBytes: rawPdfBytes);
         cloudMessage = 'Расписание выгружено в облако';
       } on CloudStorageException catch (error) {
         _logger.warning('Не удалось выгрузить расписание в облако', error);
