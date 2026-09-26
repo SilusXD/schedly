@@ -87,6 +87,17 @@ void main() {
       expect(page.text, lines.join('\n'));
     });
 
+    test('CP1251 в коротких строках и отдельных символах', () async {
+      // Одиночные буквы и короткие слова: раньше на них не срабатывала
+      // эвристика и текст выходил как 'Ðàç'.
+      final lines = <String>['Р', 'Раз', 'Ёё', '№ 5', '«Ёлка», тест'];
+      final page = (await extractor.extract(buildSimplePdf(lines: lines)))
+          .pages
+          .single;
+      expect(page.text, lines.join('\n'));
+      expect(page.text, isNot(contains('Ð')));
+    });
+
     test('Type0/Identity-H через /ToUnicode', () async {
       final lines = <String>[
         'Расписание группы ИС-21',
@@ -391,18 +402,27 @@ void main() {
 
   group('фикстуры', () {
     test('cp1251Encode покрывает кириллицу и пунктуацию', () {
+      // Windows-1251: А=0xC0, Я=0xDF, а=0xE0, я=0xFF (сплошной блок А..я).
       expect(cp1251Encode('А'), <int>[0xC0]);
+      expect(cp1251Encode('Р'), <int>[0xD0]);
       expect(cp1251Encode('я'), <int>[0xFF]);
       expect(cp1251Encode('ё'), <int>[0xB8]);
+      expect(cp1251Encode('№'), <int>[0xB9]);
       expect(cp1251Encode('—'), <int>[0x97]);
       expect(cp1251Encode('«»'), <int>[0xAB, 0xBB]);
       expect(cp1251Encode('A'), <int>[0x41]);
       expect(cp1251Encode('☃'), <int>[0x3F]);
+      // Обратная проверка: блок А..я линеен и покрывает весь диапазон.
+      expect(cp1251Encode('АБВГДЕЖЗ'), <int>[0xC0, 0xC1, 0xC2, 0xC3, 0xC4, 0xC5, 0xC6, 0xC7]);
+      expect(cp1251Encode('абвгдежз'), <int>[0xE0, 0xE1, 0xE2, 0xE3, 0xE4, 0xE5, 0xE6, 0xE7]);
     });
 
     test('pdfLiteralString экранирует спецсимволы', () {
       expect(pdfLiteralString(<int>[0x28, 0x29, 0x5C]), r'(\(\)\\)');
+      // 'А' = 0xC0 = 0o300, 'Р' = 0xD0 = 0o320.
       expect(pdfLiteralString(cp1251Encode('А')), r'(\300)');
+      expect(pdfLiteralString(cp1251Encode('Р')), r'(\320)');
+      expect(pdfLiteralString(cp1251Encode('я')), r'(\377)');
     });
 
     test('pdfHexString пишет двухбайтовые коды', () {

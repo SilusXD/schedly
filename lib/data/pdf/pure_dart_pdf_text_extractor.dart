@@ -125,8 +125,6 @@ class _Lexer {
   /// аксессоры вокруг него ничего не добавляли бы.
   int position;
 
-  bool get isAtEnd => position >= data.length;
-
   static bool _isWhitespace(int c) =>
       c == 0x00 ||
       c == 0x09 ||
@@ -570,27 +568,46 @@ class _EncodingTables {
       '\u0451\u2116\u0454\u00BB\u0458\u0405\u0455\u0457';
 
   /// Возвращает строку для кода [code] (0..255) или `null`.
+  ///
+  /// Для `/WinAnsiEncoding` и `/StandardEncoding` байты 0x80..0xFF трактуются
+  /// как CP1251 (Windows-1251): русские генераторы PDF массово кладут байты
+  /// CP1251 в шрифт с объявленной кодировкой WinAnsi, а настоящая CP1252 в
+  /// кириллических документах не встречается. Если код в CP1251 не определён
+  /// (например, 0x98), берётся значение из объявленной таблицы.
+  ///
+  /// Приоритет `/ToUnicode` и `/Differences` выше: если они есть у шрифта,
+  /// применяются именно они (см. `_FontInfo._charFor`), поэтому корректно
+  /// размеченные PDF с западноевропейским текстом читаются точно.
   static String? lookup(_SimpleEncoding encoding, int code) {
     if (code < 0 || code > 255) return null;
     if (code < 0x20) return null;
     if (code < 0x80) return String.fromCharCode(code);
     switch (encoding) {
       case _SimpleEncoding.winAnsi:
-        if (code < 0xA0) {
-          final char = _cp1252High.codeUnitAt(code - 0x80);
-          return char == 0 ? null : String.fromCharCode(char);
-        }
-        return String.fromCharCode(code);
+        return lookupCp1251(code) ?? _lookupCp1252(code);
       case _SimpleEncoding.macRoman:
         return String.fromCharCode(_macRomanHigh.codeUnitAt(code - 0x80));
       case _SimpleEncoding.standard:
-        if (code < 0xA0) return null;
-        final char = _standardHigh.codeUnitAt(code - 0xA0);
-        return char == 0 ? null : String.fromCharCode(char);
+        return lookupCp1251(code) ?? _lookupStandard(code);
     }
   }
 
-  /// Таблица CP1251 (используется эвристикой «WinAnsi с кириллицей»).
+  /// Байт в диапазоне 0xA0..0xFF совпадает с Unicode-кодом (Latin-1).
+  static String? _lookupCp1252(int code) {
+    if (code < 0xA0) {
+      final char = _cp1252High.codeUnitAt(code - 0x80);
+      return char == 0 ? null : String.fromCharCode(char);
+    }
+    return String.fromCharCode(code);
+  }
+
+  static String? _lookupStandard(int code) {
+    if (code < 0xA0) return null;
+    final char = _standardHigh.codeUnitAt(code - 0xA0);
+    return char == 0 ? null : String.fromCharCode(char);
+  }
+
+  /// Таблица CP1251 (Windows-1251): 0xC0..0xFF — сплошной блок А..я.
   static String? lookupCp1251(int code) {
     if (code < 0x20) return null;
     if (code < 0x80) return String.fromCharCode(code);
@@ -626,55 +643,11 @@ class _FontInfo {
   final Map<int, double> widths;
   final double defaultWidth;
 
-  final Map<int, int> _histogram = <int, int>{};
-  bool _decided = false;
-  bool _cp1251Override = false;
-
-  /// Учитывает коды, встреченные в документе (для эвристики кодировки).
-  void observe(Iterable<int> codes) {
-    if (twoByte || toUnicode != null || differences != null) return;
-    for (final code in codes) {
-      _histogram[code] = (_histogram[code] ?? 0) + 1;
-    }
-  }
-
-  /// Решает, трактовать ли однобайтовые коды как CP1251.
+  /// Декодирует один байт в текст.
   ///
-  /// В реальных PDF продюсеры часто кладут байты CP1251 в шрифт с
-  /// `/Encoding /WinAnsiEncoding` (распространённый русский вариант). Признак —
-  /// высокая доля кодов в диапазоне 0xC0..0xFF: в CP1252 там лежат только
-  /// латинские буквы с диакритикой (À–ÿ), которые в русских документах
-  /// практически не встречаются.
-  ///
-  /// Порог проверяется двумя способами: для больших текстов достаточно
-  /// четверти таких кодов, для коротких строк (например, заголовка «Раз»)
-  /// требовать не менее половины — иначе эвристика не срабатывала на малом
-  /// объёме данных.
-  void decideLegacy() {
-    if (_decided) return;
-    _decided = true;
-    if (twoByte || toUnicode != null || differences != null) return;
-    if (encoding != _SimpleEncoding.winAnsi &&
-        encoding != _SimpleEncoding.standard) {
-      return;
-    }
-    var high = 0;
-    var total = 0;
-    for (final entry in _histogram.entries) {
-      total += entry.value;
-      if (entry.key >= 0xC0 && entry.key <= 0xFF) high += entry.value;
-    }
-    if (total == 0) return;
-    final double highRatio = high / total;
-    if (high >= 5 && highRatio >= 0.25) {
-      _cp1251Override = true;
-      return;
-    }
-    if (high >= 2 && highRatio >= 0.5) {
-      _cp1251Override = true;
-    }
-  }
-
+  /// Приоритет: `/ToUnicode` → `/Differences` → базовая кодировка шрифта
+  /// (для WinAnsi/Standard высокие байты трактуются как CP1251, см.
+  /// [_EncodingTables.lookup]).
   String _charFor(int code) {
     final unicode = toUnicode;
     if (unicode != null) {
@@ -688,10 +661,6 @@ class _FontInfo {
       if (mapped != null) return mapped;
     }
     if (twoByte) return '';
-    if (_cp1251Override) {
-      final mapped = _EncodingTables.lookupCp1251(code);
-      if (mapped != null) return mapped;
-    }
     final mapped = _EncodingTables.lookup(encoding, code);
     if (mapped != null) return mapped;
     return code >= 0x20 ? String.fromCharCode(code) : '';
@@ -1267,7 +1236,6 @@ class _ContentParser {
           fontSize: _pendingFontSize <= 0 ? 12 : _pendingFontSize,
         ),
       );
-      font.observe(codes);
     }
     _pendingCodes.clear();
     _pendingFont = null;
@@ -2474,7 +2442,6 @@ class _PdfFile {
     final placed = <_PlacedFragment>[];
     final transform = rawPage.transform;
     for (final raw in rawPage.fragments) {
-      raw.font.decideLegacy();
       final text = raw.font.textOf(raw.codes);
       if (text.isEmpty) continue;
       placed.add(_PlacedFragment(_placeFragment(raw, transform, text), raw.baseline));
