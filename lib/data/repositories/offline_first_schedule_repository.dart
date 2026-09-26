@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import '../../core/app_config.dart';
 import '../../core/app_logger.dart';
 import '../../core/date_utils.dart';
+import '../../domain/models/lesson.dart';
 import '../../domain/models/lesson_note.dart';
 import '../../domain/models/schedule.dart';
 import '../../domain/repositories/schedule_repository.dart';
@@ -15,10 +16,12 @@ import '../cloud/cloud_storage_factory.dart';
 import '../local/notes_store.dart';
 import '../local/schedule_cache.dart';
 import '../local/settings_store.dart';
+import '../parser/schedule_merger.dart';
 import '../parser/schedule_parser.dart';
 import '../pdf/pdf_text.dart';
 import '../pdf/pdf_text_extractor.dart';
 import '../remote/http_client.dart';
+import '../remote/schedule_page_source.dart';
 import '../remote/schedule_pdf_source.dart';
 
 /// Репозиторий расписания с приоритетом локальных данных (offline-first).
@@ -41,6 +44,7 @@ class OfflineFirstScheduleRepository implements ScheduleRepository {
     required SchedulePdfSource pdfSource,
     required PdfTextExtractor extractor,
     required ScheduleParser parser,
+    SchedulePageSource? pageSource,
     CloudStorage? cloudStorage,
     AppLogger? logger,
   })  : _config = config,
@@ -50,6 +54,7 @@ class OfflineFirstScheduleRepository implements ScheduleRepository {
         _pdfSource = pdfSource,
         _extractor = extractor,
         _parser = parser,
+        _pageSource = pageSource ?? SchedulePageSource(config: config, logger: logger),
         _cloudOverride = cloudStorage,
         _logger = logger ?? appLogger;
 
@@ -60,6 +65,7 @@ class OfflineFirstScheduleRepository implements ScheduleRepository {
   final SchedulePdfSource _pdfSource;
   final PdfTextExtractor _extractor;
   final ScheduleParser _parser;
+  final SchedulePageSource _pageSource;
   final CloudStorage? _cloudOverride;
   final AppLogger _logger;
 
@@ -114,6 +120,147 @@ class OfflineFirstScheduleRepository implements ScheduleRepository {
 
   @override
   Future<ScheduleLoadResult> refresh() async {
+    final String pageUrl = _settings.pageUrl(_config).trim();
+    if (pageUrl.isNotEmpty) {
+      try {
+        return await _refreshFromPage(pageUrl);
+      } on ScheduleNotAvailableException catch (error) {
+        _logger.warning('Не удалось получить расписание со страницы', error);
+      } on NetworkException catch (error) {
+        _logger.warning('Ошибка сети при загрузке страницы расписания', error);
+      } on HttpStatusException catch (error) {
+        _logger.warning('Страница расписания вернула ошибку', error);
+      } on PdfTextExtractionException catch (error) {
+        _logger.error('Не удалось извлечь текст из PDF со страницы', error);
+      } on ScheduleParseException catch (error) {
+        _logger.error('Не удалось разобрать расписание со страницы', error);
+      } on Object catch (error) {
+        _logger.error('Непредвиденная ошибка при загрузке со страницы', error);
+      }
+      // Если не получилось — переходим к обычному сценарию с шаблоном ссылки
+      // и, при неудаче, к откату на кэш/облако.
+    }
+    return _refreshFromTemplate();
+  }
+
+  /// Загрузка по странице-каталогу: ежедневное расписание + полугодовое,
+  /// затем слияние (аудитории и замены — из ежедневного, предметы и плановые
+  /// преподаватели — из полугодового).
+  Future<ScheduleLoadResult> _refreshFromPage(String pageUrl) async {
+    final SchedulePageIndex index = await _pageSource.fetchIndex(pageUrl);
+    if (index.isEmpty) {
+      throw ScheduleNotAvailableException(
+        'На странице не найдено ссылок на файлы расписания',
+      );
+    }
+
+    final DateTime today = dateOnly(DateTime.now());
+    final SchedulePageLink? dailyLink = index.dailyFor(today);
+    if (dailyLink == null) {
+      throw ScheduleNotAvailableException('На странице нет ежедневного расписания');
+    }
+
+    final DateTime dailyDate = dailyLink.date ?? today;
+    final SchedulePdf dailyPdf =
+        await _pdfSource.downloadLink(dailyLink.uri, dailyDate);
+    final PdfDocumentText dailyText = await _extractor.extract(dailyPdf.bytes);
+    final ParseOutcome dailyOutcome = _parser.parse(
+      dailyText,
+      scheduleDate: dailyDate,
+      sourceUrl: dailyLink.uri.toString(),
+    );
+
+    final List<Lesson> semesterLessons = await _semesterLessons(index);
+    final List<Lesson> merged = semesterLessons.isEmpty
+        ? dailyOutcome.schedule.lessons
+        : ScheduleMerger(logger: _logger).merge(
+            semester: semesterLessons,
+            daily: dailyOutcome.schedule.lessons,
+          );
+
+    final List<String> warnings = <String>[...dailyOutcome.schedule.warnings];
+    if (semesterLessons.isEmpty) {
+      warnings.add('Полугодовое расписание недоступно: предметы не подставлены');
+    }
+
+    final ParsedSchedule schedule = ParsedSchedule.fromLessons(
+      lessons: merged,
+      scheduleDate: dailyDate,
+      parsedAt: DateTime.now(),
+      sourceUrl: dailyLink.uri.toString(),
+      warnings: warnings,
+      rawText: dailyOutcome.schedule.rawText,
+    );
+
+    await _cache.save(schedule, maxEntries: _config.maxCacheFiles);
+    await _saveRawPdf(dailyPdf.bytes, dailyDate);
+
+    String? cloudMessage;
+    if (_cloud != null && _cloudConfig.autoSync) {
+      try {
+        await _uploadToCloud(schedule, pdfBytes: dailyPdf.bytes);
+        cloudMessage = 'Расписание выгружено в облако';
+      } on CloudStorageException catch (error) {
+        _logger.warning('Не удалось выгрузить расписание в облако', error);
+        cloudMessage = 'Облако недоступно: ${error.message}';
+      }
+    }
+
+    final int replacements =
+        merged.where((Lesson lesson) => lesson.isReplacement).length;
+    return ScheduleLoadResult(
+      schedule: schedule,
+      source: ScheduleSource.network,
+      cachedAt: schedule.parsedAt,
+      message: <String>[
+        ?cloudMessage,
+        if (replacements > 0) 'замен: $replacements',
+      ].join(' · '),
+    );
+  }
+
+  /// Полугодовое расписание: из кэша, если он свежий, иначе — со страницы.
+  Future<List<Lesson>> _semesterLessons(SchedulePageIndex index) async {
+    final DateTime? savedAt = _cache.semesterSavedAt();
+    final List<Lesson> cached = _cache.semesterLessons();
+    if (cached.isNotEmpty &&
+        savedAt != null &&
+        DateTime.now().difference(savedAt).inHours < AppConfig.semesterCacheHours) {
+      _logger.debug('Полугодовое расписание взято из кэша: ${cached.length} записей');
+      return cached;
+    }
+
+    final List<SchedulePageLink> links = index.semesterForAllCourses();
+    if (links.isEmpty) {
+      return cached;
+    }
+
+    final List<Lesson> lessons = <Lesson>[];
+    for (final SchedulePageLink link in links) {
+      try {
+        final SchedulePdf pdf =
+            await _pdfSource.downloadLink(link.uri, dateOnly(DateTime.now()));
+        final PdfDocumentText text = await _extractor.extract(pdf.bytes);
+        final ParseOutcome outcome = _parser.parse(
+          text,
+          scheduleDate: dateOnly(DateTime.now()),
+          sourceUrl: link.uri.toString(),
+        );
+        lessons.addAll(outcome.schedule.lessons);
+      } on Object catch (error) {
+        _logger.warning('Не удалось разобрать полугодовое расписание ${link.uri}', error);
+      }
+    }
+
+    if (lessons.isEmpty) {
+      return cached;
+    }
+    await _cache.saveSemester(lessons, sourceUrl: links.first.uri.toString());
+    return lessons;
+  }
+
+  /// Загрузка по шаблону ссылки с датой (прежний сценарий).
+  Future<ScheduleLoadResult> _refreshFromTemplate() async {
     final DateTime today = dateOnly(DateTime.now());
     final String template = _settings.urlTemplate(_config);
     final List<String> details = <String>[];

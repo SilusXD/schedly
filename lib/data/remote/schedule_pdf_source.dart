@@ -146,6 +146,15 @@ class SchedulePdfSource {
     );
   }
 
+  /// Скачивает файл по конкретной ссылке.
+  ///
+  /// Используется, когда адрес найден на странице-каталоге: имя файла там
+  /// содержит случайный хеш, и ссылку нельзя собрать по шаблону с датой.
+  Future<SchedulePdf> downloadLink(Uri uri, DateTime date) async {
+    final Uint8List bytes = await _client.download(uri);
+    return SchedulePdf(bytes: bytes, uri: uri, date: date);
+  }
+
   /// Пытается извлечь дату из ссылки (имя файла содержит дату).
   DateTime? dateFromUri(Uri uri) => parseDateFromText(uri.path);
 

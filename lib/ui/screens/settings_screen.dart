@@ -17,6 +17,7 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   final TextEditingController _urlController = TextEditingController();
+  final TextEditingController _pageUrlController = TextEditingController();
   final TextEditingController _endpointController = TextEditingController();
   final TextEditingController _regionController = TextEditingController();
   final TextEditingController _bucketController = TextEditingController();
@@ -41,6 +42,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   @override
   void dispose() {
     _urlController.dispose();
+    _pageUrlController.dispose();
     _endpointController.dispose();
     _regionController.dispose();
     _bucketController.dispose();
@@ -53,6 +55,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _load() async {
     final ScheduleController controller = context.read<ScheduleController>();
     _urlController.text = controller.settings.urlTemplate(controller.config);
+    _pageUrlController.text = controller.settings.pageUrl(controller.config);
     _autoRefresh = controller.settings.autoRefresh();
 
     final CloudConfig cloud = await controller.settings.cloudConfig();
@@ -111,11 +114,30 @@ class _SettingsScreenState extends State<SettingsScreen> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
                   TextField(
+                    controller: _pageUrlController,
+                    keyboardType: TextInputType.url,
+                    autocorrect: false,
+                    decoration: const InputDecoration(
+                      labelText: 'Страница с расписанием (рекомендуется)',
+                      hintText: 'https://www.fa.ru/kip/students/schedule.php',
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Если адрес страницы указан, приложение берёт с неё ссылки на '
+                    'ежедневное и полугодовое расписание (имя файла содержит случайный '
+                    'хеш, поэтому шаблон с датой для таких сайтов не работает) и '
+                    'объединяет их: предметы — из полугодового, аудитории и замены — '
+                    'из ежедневного.',
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
                     controller: _urlController,
                     keyboardType: TextInputType.url,
                     autocorrect: false,
                     decoration: const InputDecoration(
-                      labelText: 'Шаблон ссылки на PDF',
+                      labelText: 'Шаблон ссылки на PDF (резервный способ)',
                       hintText: 'https://school.ru/schedule_{yyyy-MM-dd}.pdf',
                     ),
                   ),
@@ -135,8 +157,10 @@ class _SettingsScreenState extends State<SettingsScreen> {
                             ? null
                             : () => _run(() async {
                                   await controller.settings
+                                      .setPageUrl(_pageUrlController.text);
+                                  await controller.settings
                                       .setUrlTemplate(_urlController.text);
-                                  _show('Шаблон ссылки сохранён');
+                                  _show('Настройки источника сохранены');
                                 }),
                         child: const Text('Сохранить'),
                       ),

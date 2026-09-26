@@ -191,12 +191,11 @@ class ScheduleParser {
         ? 'unknown'
         : (usedStrategies.toList()..sort()).join('+');
 
-    final ParsedSchedule schedule = ParsedSchedule(
+    final ParsedSchedule schedule = ParsedSchedule.fromLessons(
+      lessons: withTime,
       scheduleDate: scheduleDate,
       parsedAt: DateTime.now(),
       sourceUrl: sourceUrl,
-      teachers: teachers,
-      groups: groups,
       warnings: warnings,
       rawText: document.text,
     );

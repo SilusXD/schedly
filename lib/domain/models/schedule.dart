@@ -91,13 +91,22 @@ class ParsedSchedule {
     required this.sourceUrl,
     required this.teachers,
     required this.groups,
+    this.lessons = const <Lesson>[],
     this.parserVersion = currentParserVersion,
     this.warnings = const <String>[],
     this.rawText,
   });
 
   /// Версия парсера: позволяет понять, что кэш построен старой логикой.
-  static const String currentParserVersion = '1.1.0';
+  static const String currentParserVersion = '2.0.0';
+
+  /// Плоский список занятий.
+  ///
+  /// Хранится рядом со сгруппированными расписаниями, потому что слияние двух
+  /// источников (ежедневного и полугодового) выполняется именно по занятиям:
+  /// ключ сопоставления — «день, пара, группа», и в модели он представлен
+  /// отдельной записью, а не «занятием внутри группы».
+  final List<Lesson> lessons;
 
   /// Дата, к которой относится расписание (из имени файла или заголовка PDF).
   final DateTime scheduleDate;
@@ -127,6 +136,77 @@ class ParsedSchedule {
   /// Ключ учебной недели (`2026-W12`) — используется для заметок и ДЗ.
   String get weekKey => isoWeekKey(scheduleDate);
 
+  /// Создаёт расписание из плоского списка занятий, группируя их по
+  /// преподавателям и группам.
+  factory ParsedSchedule.fromLessons({
+    required List<Lesson> lessons,
+    required DateTime scheduleDate,
+    required DateTime parsedAt,
+    required String sourceUrl,
+    List<String> warnings = const <String>[],
+    String? rawText,
+    String parserVersion = currentParserVersion,
+  }) {
+    final List<Lesson> sorted = List<Lesson>.of(lessons)
+      ..sort((Lesson a, Lesson b) => a.compareTo(b));
+    return ParsedSchedule(
+      lessons: sorted,
+      teachers: entitiesFrom(sorted, ScheduleEntityType.teacher),
+      groups: entitiesFrom(sorted, ScheduleEntityType.group),
+      scheduleDate: scheduleDate,
+      parsedAt: parsedAt,
+      sourceUrl: sourceUrl,
+      warnings: warnings,
+      rawText: rawText,
+      parserVersion: parserVersion,
+    );
+  }
+
+  /// Группирует занятия по преподавателям или группам.
+  static List<EntitySchedule> entitiesFrom(
+    List<Lesson> lessons,
+    ScheduleEntityType type,
+  ) {
+    final Map<String, Map<String, Lesson>> byEntity = <String, Map<String, Lesson>>{};
+    for (final Lesson lesson in lessons) {
+      final String raw =
+          type == ScheduleEntityType.teacher ? lesson.teacherName : lesson.groupName;
+      for (final String name in raw
+          .split(RegExp(r'[,;]'))
+          .map((String part) => part.trim())
+          .where((String part) => part.isNotEmpty)
+          .toSet()) {
+        final Map<String, Lesson> bucket =
+            byEntity.putIfAbsent(name, () => <String, Lesson>{});
+        bucket[_lessonKey(lesson)] = lesson;
+      }
+    }
+
+    final List<EntitySchedule> result = byEntity.entries
+        .map(
+          (MapEntry<String, Map<String, Lesson>> entry) => EntitySchedule(
+            name: entry.key,
+            type: type,
+            lessons: entry.value.values.toList()
+              ..sort((Lesson a, Lesson b) => a.compareTo(b)),
+          ),
+        )
+        .toList()
+      ..sort((EntitySchedule a, EntitySchedule b) => a.name.compareTo(b.name));
+    return result;
+  }
+
+  /// Ключ уникальности занятия внутри сущности (группа учитывается всегда,
+  /// иначе занятия разных групп склеились бы).
+  static String _lessonKey(Lesson lesson) => <String>[
+        lesson.weekday.isoNumber.toString(),
+        lesson.pairNumber.toString(),
+        lesson.mergeKey,
+        lesson.groupName.toLowerCase(),
+        lesson.teacherName.toLowerCase(),
+        lesson.parity.name,
+      ].join('|');
+
   /// Понедельник учебной недели.
   DateTime get weekStart => isoWeekStart(scheduleDate);
 
@@ -136,13 +216,16 @@ class ParsedSchedule {
   /// Количество уникальных занятий в расписании.
   ///
   /// Одно и то же занятие присутствует и в расписании преподавателя, и в
-  /// расписании группы, поэтому занятия объединяются по [Lesson.mergeKey] —
-  /// иначе они считались бы дважды.
+  /// расписании группы, поэтому занятия объединяются по ключу — иначе они
+  /// считались бы дважды.
   int get lessonCount {
+    if (lessons.isNotEmpty) {
+      return lessons.map(_lessonKey).toSet().length;
+    }
     final Set<String> keys = <String>{};
     for (final EntitySchedule entity in <EntitySchedule>[...teachers, ...groups]) {
       for (final Lesson lesson in entity.lessons) {
-        keys.add(lesson.mergeKey);
+        keys.add(_lessonKey(lesson));
       }
     }
     return keys.length;
@@ -193,6 +276,7 @@ class ParsedSchedule {
     String? sourceUrl,
     List<EntitySchedule>? teachers,
     List<EntitySchedule>? groups,
+    List<Lesson>? lessons,
     String? parserVersion,
     List<String>? warnings,
     String? rawText,
@@ -203,6 +287,7 @@ class ParsedSchedule {
       sourceUrl: sourceUrl ?? this.sourceUrl,
       teachers: teachers ?? this.teachers,
       groups: groups ?? this.groups,
+      lessons: lessons ?? this.lessons,
       parserVersion: parserVersion ?? this.parserVersion,
       warnings: warnings ?? this.warnings,
       rawText: rawText ?? this.rawText,
@@ -219,6 +304,7 @@ class ParsedSchedule {
         'sourceUrl': sourceUrl,
         'warnings': warnings,
         if (includeRawText && rawText != null) 'rawText': rawText,
+        'lessons': lessons.map((Lesson lesson) => lesson.toJson()).toList(),
         'teachers': teachers.map((EntitySchedule item) => item.toJson()).toList(),
         'groups': groups.map((EntitySchedule item) => item.toJson()).toList(),
       };
@@ -244,9 +330,23 @@ class ParsedSchedule {
           ? (json['warnings'] as List<dynamic>).whereType<String>().toList()
           : const <String>[],
       rawText: json['rawText'] is String ? json['rawText'] as String : null,
+      lessons: _lessons(json['lessons']),
       teachers: _entities(json['teachers'], ScheduleEntityType.teacher),
       groups: _entities(json['groups'], ScheduleEntityType.group),
     );
+  }
+
+  /// Читает плоский список занятий; если его нет (старый кэш) — собирает из
+  /// сгруппированных расписаний.
+  static List<Lesson> _lessons(Object? raw) {
+    if (raw is List) {
+      return raw
+          .whereType<Map<dynamic, dynamic>>()
+          .map((Map<dynamic, dynamic> item) =>
+              Lesson.fromJson(Map<String, dynamic>.from(item)))
+          .toList();
+    }
+    return const <Lesson>[];
   }
 
   /// Разбор из строки JSON (данные локального кэша или облака).

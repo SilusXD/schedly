@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import '../../core/app_logger.dart';
 import '../../core/date_utils.dart';
+import '../../domain/models/lesson.dart';
 import '../../domain/models/schedule.dart';
 import 'local_storage.dart';
 
@@ -86,6 +89,65 @@ class ScheduleCache {
 
   /// Полностью очищает кэш расписаний.
   Future<void> clear() => _storage.schedules.clear();
+
+  /// Сохраняет список занятий полугодового расписания.
+  ///
+  /// Полугодовое расписание меняется редко, но содержит предметы и плановых
+  /// преподавателей, поэтому хранится отдельно от ежедневного кэша.
+  Future<void> saveSemester(List<Lesson> lessons, {String sourceUrl = ''}) async {
+    final Map<String, dynamic> payload = <String, dynamic>{
+      'savedAt': DateTime.now().toIso8601String(),
+      'sourceUrl': sourceUrl,
+      'lessons': lessons.map((Lesson lesson) => lesson.toJson()).toList(),
+    };
+    await _storage.semesterCache.put(_semesterKey, jsonEncode(payload));
+    _logger.info('Полугодовое расписание сохранено в кэш: ${lessons.length} записей');
+  }
+
+  /// Читает полугодовое расписание из кэша.
+  List<Lesson> semesterLessons() {
+    final String? raw = _storage.semesterCache.get(_semesterKey);
+    if (raw == null || raw.isEmpty) {
+      return const <Lesson>[];
+    }
+    try {
+      final Object? decoded = jsonDecode(raw);
+      if (decoded is! Map) {
+        return const <Lesson>[];
+      }
+      final Object? lessons = decoded['lessons'];
+      if (lessons is! List) {
+        return const <Lesson>[];
+      }
+      return lessons
+          .whereType<Map<dynamic, dynamic>>()
+          .map((Map<dynamic, dynamic> item) =>
+              Lesson.fromJson(Map<String, dynamic>.from(item)))
+          .toList();
+    } on FormatException catch (error) {
+      _logger.warning('Кэш полугодового расписания повреждён', error);
+      return const <Lesson>[];
+    }
+  }
+
+  /// Когда было сохранено полугодовое расписание.
+  DateTime? semesterSavedAt() {
+    final String? raw = _storage.semesterCache.get(_semesterKey);
+    if (raw == null || raw.isEmpty) {
+      return null;
+    }
+    try {
+      final Object? decoded = jsonDecode(raw);
+      if (decoded is Map && decoded['savedAt'] is String) {
+        return DateTime.tryParse(decoded['savedAt'] as String);
+      }
+    } on FormatException {
+      return null;
+    }
+    return null;
+  }
+
+  static const String _semesterKey = 'semester';
 
   String _key(DateTime date) => '$_prefix${formatIsoDate(date)}';
 

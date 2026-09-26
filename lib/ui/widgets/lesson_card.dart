@@ -228,6 +228,25 @@ class _LessonCardState extends State<LessonCard> {
     if (widget.lesson.subgroup.isNotEmpty) {
       chips.add(_MetaChip(icon: Icons.call_split, text: widget.lesson.subgroup));
     }
+    // Обозначения группы бывают перечислены через запятую — показываем их
+    // отдельно, чтобы карточка читалась как в расписании.
+    if (widget.lesson.parity != WeekParity.both) {
+      chips.add(_MetaChip(
+        icon: Icons.event_repeat_outlined,
+        text: widget.lesson.parity == WeekParity.numerator
+            ? 'нечётная неделя'
+            : 'чётная неделя',
+      ));
+    }
+    if (widget.lesson.isReplacement) {
+      chips.add(_MetaChip(
+        icon: Icons.swap_horiz,
+        text: widget.lesson.plannedTeacherName.isEmpty
+            ? 'замена'
+            : 'замена (по плану: ${widget.lesson.plannedTeacherName})',
+        highlight: true,
+      ));
+    }
     return chips;
   }
 }
@@ -263,31 +282,38 @@ class _PairBadge extends StatelessWidget {
 }
 
 class _MetaChip extends StatelessWidget {
-  const _MetaChip({required this.icon, required this.text});
+  const _MetaChip({required this.icon, required this.text, this.highlight = false});
 
   final IconData icon;
   final String text;
 
+  /// Выделить чип цветом (используется для замены).
+  final bool highlight;
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme scheme = Theme.of(context).colorScheme;
+    final Color background =
+        highlight ? scheme.tertiaryContainer : scheme.surfaceContainerHighest;
+    final Color foreground =
+        highlight ? scheme.onTertiaryContainer : scheme.onSurfaceVariant;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: scheme.surfaceContainerHighest,
+        color: background,
         borderRadius: BorderRadius.circular(8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          Icon(icon, size: 13, color: scheme.onSurfaceVariant),
+          Icon(icon, size: 13, color: foreground),
           const SizedBox(width: 4),
           Text(
             text,
             style: Theme.of(context)
                 .textTheme
                 .labelSmall
-                ?.copyWith(color: scheme.onSurfaceVariant),
+                ?.copyWith(color: foreground),
           ),
         ],
       ),

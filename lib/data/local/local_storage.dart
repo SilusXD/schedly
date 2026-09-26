@@ -14,6 +14,9 @@ class HiveBoxes {
 
   /// Настройки приложения.
   static const String settings = 'settings';
+
+  /// Кэш полугодового расписания (меняется редко, качается отдельно).
+  static const String semester = 'semester';
 }
 
 /// Доступ к локальному хранилищу Hive.
@@ -35,6 +38,7 @@ class LocalStorage {
   Box<String>? _schedules;
   Box<String>? _notes;
   Box<String>? _settings;
+  Box<String>? _semester;
 
   /// Инициализирует Hive. Повторные вызовы безопасны.
   Future<void> init() async {
@@ -49,6 +53,7 @@ class LocalStorage {
     _schedules = await Hive.openBox<String>(HiveBoxes.schedules);
     _notes = await Hive.openBox<String>(HiveBoxes.notes);
     _settings = await Hive.openBox<String>(HiveBoxes.settings);
+    _semester = await Hive.openBox<String>(HiveBoxes.semester);
     _initialized = true;
     _logger.info('Локальный кэш готов: расписаний ${_schedules!.length}, '
         'заметок ${_notes!.length}, настроек ${_settings!.length}');
@@ -62,6 +67,9 @@ class LocalStorage {
 
   /// Бокс настроек.
   Box<String> get settings => _require(_settings, HiveBoxes.settings);
+
+  /// Бокс кэша полугодового расписания.
+  Box<String> get semesterCache => _require(_semester, HiveBoxes.semester);
 
   Box<String> _require(Box<String>? box, String name) {
     if (box == null) {

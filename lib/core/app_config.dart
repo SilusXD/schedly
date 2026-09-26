@@ -9,6 +9,7 @@ library;
 class AppConfig {
   const AppConfig({
     this.scheduleUrlTemplate = defaultScheduleUrlTemplate,
+    this.schedulePageUrl = defaultSchedulePageUrl,
     this.fallbackDaysBack = 6,
     this.futureDaysForward = 0,
     this.downloadTimeout = const Duration(seconds: 30),
@@ -28,8 +29,23 @@ class AppConfig {
   static const String defaultScheduleUrlTemplate =
       'https://example.com/schedule_{yyyy-MM-dd}.pdf';
 
-  /// Шаблон ссылки на PDF. Поддерживает плейсхолдеры из `applyDateTemplate`.
+  /// Адрес страницы-каталога расписаний по умолчанию (КИП Фин.университета).
+  ///
+  /// Со страницы берутся ссылки на ежедневное «общее» расписание и на
+  /// полугодовые файлы по курсам: имя файла содержит случайный хеш, поэтому
+  /// собрать ссылку по шаблону с датой невозможно.
+  static const String defaultSchedulePageUrl =
+      'https://www.fa.ru/kip/students/schedule.php';
+
+  /// Сколько часов считается «свежим» кэш полугодового расписания.
+  static const int semesterCacheHours = 24;
+
+  /// Шаблон ссылки на PDF (используется, когда страница-каталог не задана).
   final String scheduleUrlTemplate;
+
+  /// Адрес страницы-каталога расписаний. Пустая строка отключает режим
+  /// страницы и возвращает работу по шаблону с датой.
+  final String schedulePageUrl;
 
   /// Сколько дней назад разрешено искать актуальный PDF, если за сегодня его нет.
   final int fallbackDaysBack;
@@ -76,12 +92,17 @@ class AppConfig {
       'CLOUD_FOLDER',
       defaultValue: 'schedules',
     );
+    const String pageUrl = String.fromEnvironment(
+      'SCHEDULE_PAGE_URL',
+      defaultValue: AppConfig.defaultSchedulePageUrl,
+    );
     const int fallbackDays = int.fromEnvironment('FALLBACK_DAYS_BACK', defaultValue: 6);
 
     return AppConfig(
       scheduleUrlTemplate: urlTemplate.trim().isEmpty
           ? AppConfig.defaultScheduleUrlTemplate
           : urlTemplate.trim(),
+      schedulePageUrl: pageUrl.trim(),
       cloudFolder: cloudFolder.trim().isEmpty ? 'schedules' : cloudFolder.trim(),
       fallbackDaysBack: fallbackDays < 0 ? 0 : fallbackDays,
     );
@@ -89,6 +110,7 @@ class AppConfig {
 
   AppConfig copyWith({
     String? scheduleUrlTemplate,
+    String? schedulePageUrl,
     int? fallbackDaysBack,
     int? futureDaysForward,
     Duration? downloadTimeout,
@@ -102,6 +124,7 @@ class AppConfig {
   }) {
     return AppConfig(
       scheduleUrlTemplate: scheduleUrlTemplate ?? this.scheduleUrlTemplate,
+      schedulePageUrl: schedulePageUrl ?? this.schedulePageUrl,
       fallbackDaysBack: fallbackDaysBack ?? this.fallbackDaysBack,
       futureDaysForward: futureDaysForward ?? this.futureDaysForward,
       downloadTimeout: downloadTimeout ?? this.downloadTimeout,

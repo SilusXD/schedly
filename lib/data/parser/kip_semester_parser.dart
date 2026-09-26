@@ -109,19 +109,39 @@ class KipSemesterParser {
           for (final String line in lines) {
             if (MatrixLayout.looksLikeTeacher(line) ||
                 MatrixLayout.vacancyPattern.hasMatch(line)) {
-              teacherLines.add(line);
+              // В ячейках встречается повтор одной и той же строки — оставляем
+              // её один раз, иначе одна неделя получала бы две записи.
+              if (!teacherLines.any(
+                  (String existing) => existing.toLowerCase() == line.toLowerCase())) {
+                teacherLines.add(line);
+              }
             } else {
               subjectLines.add(line);
             }
           }
 
-          // Название предмета может занимать несколько строк («Иностранный
-          // язык в сфере профессиональной деятельности»), поэтому все строки
-          // без ФИО склеиваются в одно название.
-          final String subject =
-              MatrixLayout.normalizeSpaces(subjectLines.join(' '));
+          // Названия предметов: строка с заглавной буквы начинает новое
+          // название, а строка со строчной — продолжение предыдущего
+          // («Основы» + «информационной безопасности»). Полные дубликаты
+          // отбрасываются: в ячейках встречается повтор одной и той же строки.
+          final List<String> subjects = <String>[];
+          for (final String line in subjectLines) {
+            if (subjects.isEmpty) {
+              subjects.add(line);
+              continue;
+            }
+            final String first = line.isEmpty ? '' : line.substring(0, 1);
+            final bool isContinuation = RegExp(r'[а-яёa-z]').hasMatch(first);
+            if (isContinuation) {
+              subjects[subjects.length - 1] = '${subjects.last} $line';
+            } else if (subjects.last.toLowerCase() != line.toLowerCase() &&
+                !subjects.any((String existing) => existing.toLowerCase() == line.toLowerCase())) {
+              subjects.add(line);
+            }
+          }
 
           if (teacherLines.isEmpty) {
+            final String subject = MatrixLayout.normalizeSpaces(subjects.join(', '));
             if (subject.isEmpty) {
               continue;
             }
@@ -139,7 +159,19 @@ class KipSemesterParser {
 
           // Две записи в одной ячейке означают деление семестра по неделям:
           // первая — нечётная (числитель), вторая — чётная (знаменатель).
+          // Если предметов ровно столько же, сколько преподавателей, они тоже
+          // распределяются по неделям (например, «Математика» и «История»).
+          final bool subjectsPerWeek =
+              subjects.length == teacherLines.length && subjects.length > 1;
+          final String sharedSubject = MatrixLayout.normalizeSpaces(subjects.join(' '));
+
           for (int slot = 0; slot < teacherLines.length; slot++) {
+            final String subject = subjectsPerWeek
+                ? MatrixLayout.normalizeSpaces(subjects[slot])
+                : sharedSubject;
+            if (subject.isEmpty && teacherLines[slot].isEmpty) {
+              continue;
+            }
             lessons.add(Lesson(
               weekday: currentWeekday,
               pairNumber: anchor.pairNumber,

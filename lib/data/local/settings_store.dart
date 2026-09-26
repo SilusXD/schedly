@@ -28,9 +28,11 @@ class SettingsStore {
   final AppLogger _logger;
 
   static const String _urlTemplateKey = 'scheduleUrlTemplate';
+  static const String _pageUrlKey = 'schedulePageUrl';
   static const String _cloudConfigKey = 'cloudConfig';
   static const String _lastSyncKey = 'lastCloudSyncAt';
   static const String _autoRefreshKey = 'autoRefreshEnabled';
+  static const String _myGroupKey = 'myGroup';
 
   /// Ключ в Keychain, под которым лежит секрет облака.
   static const String cloudSecretStorageKey = 'schedly.cloud.secret';
@@ -48,6 +50,33 @@ class SettingsStore {
   Future<void> setUrlTemplate(String template) async {
     await _storage.settings.put(_urlTemplateKey, template.trim());
     _logger.info('Шаблон ссылки обновлён: ${template.trim()}');
+  }
+
+  /// Адрес страницы-каталога расписаний.
+  ///
+  /// Если адрес задан, приложение берёт ссылки со страницы (ежедневное
+  /// «общее» расписание и полугодовые файлы), а шаблон с датой не используется.
+  String pageUrl(AppConfig fallback) {
+    final String? value = _storage.settings.get(_pageUrlKey);
+    if (value == null) {
+      return fallback.schedulePageUrl;
+    }
+    return value.trim();
+  }
+
+  /// Сохраняет адрес страницы-каталога.
+  Future<void> setPageUrl(String url) async {
+    await _storage.settings.put(_pageUrlKey, url.trim());
+    _logger.info('Адрес страницы расписания: ${url.trim()}');
+  }
+
+  /// Группа пользователя (нужна для выбора полугодового расписания).
+  String myGroup() => _storage.settings.get(_myGroupKey)?.trim() ?? '';
+
+  /// Сохраняет группу пользователя.
+  Future<void> setMyGroup(String group) async {
+    await _storage.settings.put(_myGroupKey, group.trim());
+    _logger.info('Выбрана группа: ${group.trim()}');
   }
 
   /// Включено ли автоматическое обновление при запуске.

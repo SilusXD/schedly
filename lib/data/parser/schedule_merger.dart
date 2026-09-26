@@ -15,51 +15,97 @@ class ScheduleMerger {
   final AppLogger _logger;
 
   /// Объединяет занятия двух источников.
+  ///
+  /// Если на одну и ту же пару и группу в полугодовом расписании приходится два
+  /// занятия (нечётная и чётная недели), ежедневное занятие сопоставляется с
+  /// тем из них, у которого совпадает преподаватель; вторая запись сохраняется
+  /// без изменений, чтобы не потерять вторую неделю.
   List<Lesson> merge({
     required List<Lesson> semester,
     required List<Lesson> daily,
   }) {
-    final Map<String, Lesson> merged = <String, Lesson>{};
-    int replacements = 0;
-
+    final Map<String, List<Lesson>> planned = <String, List<Lesson>>{};
     for (final Lesson lesson in semester) {
-      merged[_key(lesson)] = lesson;
+      planned.putIfAbsent(_key(lesson), () => <Lesson>[]).add(lesson);
     }
 
-    for (final Lesson lesson in daily) {
-      final String key = _key(lesson);
-      final Lesson? planned = merged[key];
-      if (planned == null) {
-        merged[key] = lesson;
+    final Map<String, Lesson> result = <String, Lesson>{};
+    int replacements = 0;
+
+    // Ключи, к которым уже «применилось» ежедневное расписание: индексы
+    // занятий внутри группы, заменённые фактическими данными.
+    final Set<String> consumed = <String>{};
+
+    for (final Lesson actual in daily) {
+      final String key = _key(actual);
+      final List<Lesson> candidates = planned[key] ?? const <Lesson>[];
+      if (candidates.isEmpty) {
+        result['$key|daily|${actual.teacherName}'] = actual;
         continue;
       }
 
-      final String fact = lesson.teacherName;
-      final String plan = planned.teacherName;
+      // Выбираем запись плана: сначала с совпадающим преподавателем,
+      // иначе — первую незанятую.
+      int index = -1;
+      for (int i = 0; i < candidates.length; i++) {
+        if (consumed.contains('$key#$i')) {
+          continue;
+        }
+        if (_samePerson(candidates[i].teacherName, actual.teacherName)) {
+          index = i;
+          break;
+        }
+      }
+      if (index < 0) {
+        for (int i = 0; i < candidates.length; i++) {
+          if (!consumed.contains('$key#$i')) {
+            index = i;
+            break;
+          }
+        }
+      }
+      if (index < 0) {
+        index = 0;
+      }
+      consumed.add('$key#$index');
+
+      final Lesson plan = candidates[index];
+      final String fact = actual.teacherName;
       final bool isReplacement =
-          fact.isNotEmpty && plan.isNotEmpty && !_samePerson(fact, plan);
+          fact.isNotEmpty && plan.teacherName.isNotEmpty && !_samePerson(fact, plan.teacherName);
       if (isReplacement) {
         replacements++;
       }
 
-      merged[key] = planned.copyWith(
-        subject: planned.subject,
-        room: lesson.room.isNotEmpty ? lesson.room : planned.room,
-        teacherName: fact.isNotEmpty ? fact : planned.teacherName,
-        plannedTeacherName: plan,
+      result['$key#$index'] = plan.copyWith(
+        subject: plan.subject,
+        room: actual.room.isNotEmpty ? actual.room : plan.room,
+        teacherName: fact.isNotEmpty ? fact : plan.teacherName,
+        plannedTeacherName: plan.teacherName,
         isReplacement: isReplacement,
-        timeStart: lesson.timeStart ?? planned.timeStart,
-        timeEnd: lesson.timeEnd ?? planned.timeEnd,
-        subgroup: lesson.subgroup.isNotEmpty ? lesson.subgroup : planned.subgroup,
-        note: lesson.note.isNotEmpty ? lesson.note : planned.note,
+        timeStart: actual.timeStart ?? plan.timeStart,
+        timeEnd: actual.timeEnd ?? plan.timeEnd,
+        subgroup: actual.subgroup.isNotEmpty ? actual.subgroup : plan.subgroup,
+        note: actual.note.isNotEmpty ? actual.note : plan.note,
       );
     }
 
-    final List<Lesson> result = merged.values.toList()
+    // Незатронутые записи плана (в том числе вторая неделя).
+    for (final MapEntry<String, List<Lesson>> entry in planned.entries) {
+      for (int i = 0; i < entry.value.length; i++) {
+        final String slot = '${entry.key}#$i';
+        if (consumed.contains(slot)) {
+          continue;
+        }
+        result[slot] = entry.value[i];
+      }
+    }
+
+    final List<Lesson> merged = result.values.toList()
       ..sort((Lesson a, Lesson b) => a.compareTo(b));
     _logger.info('Слияние расписаний: ${semester.length} семестровых + '
-        '${daily.length} ежедневных → ${result.length} записей, замен: $replacements');
-    return result;
+        '${daily.length} ежедневных → ${merged.length} записей, замен: $replacements');
+    return merged;
   }
 
   /// Ключ сопоставления: день, номер пары и группа.
